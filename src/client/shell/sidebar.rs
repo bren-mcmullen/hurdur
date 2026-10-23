@@ -211,10 +211,12 @@ pub(crate) fn render_sidebar(
     } else {
         Rect::new(area.right().saturating_sub(1), area.y, 1, area.height)
     };
+    let (split_area, fork_sections) =
+        super::super::fork_sections::split_sidebar(area, config, hits);
     let (workspace_area, detail_area) =
-        crate::ui::expanded_sidebar_sections(area, state.sidebar_section_split);
+        crate::ui::expanded_sidebar_sections(split_area, state.sidebar_section_split);
     hits.sidebar_section_divider =
-        crate::ui::sidebar_section_divider_rect(area, state.sidebar_section_split);
+        crate::ui::sidebar_section_divider_rect(split_area, state.sidebar_section_split);
     put_text(
         buffer,
         workspace_area.x,
@@ -438,6 +440,7 @@ pub(crate) fn render_sidebar(
         state.agent_scroll,
         hits,
     );
+    super::super::fork_sections::render(buffer, &fork_sections, config, hits);
 
     hits.sidebar_toggle = Rect::new(
         area.right().saturating_sub(2),

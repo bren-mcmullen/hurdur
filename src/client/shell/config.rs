@@ -69,6 +69,7 @@ impl ClientShellState {
     }
 
     pub(crate) fn reload_client_config(&mut self) {
+        self.config.fork_sections.reload();
         match crate::config::load_live_config() {
             Ok(loaded) => {
                 let agent_panel_sort = self.config.agent_panel_sort;
@@ -159,6 +160,7 @@ impl ClientShellConfig {
             preferences: preferences::ClientChromePreferences::default(),
             startup_config_diagnostic: None,
             startup_onboarding: false,
+            fork_sections: super::fork_sections::ForkSections::load(),
         }
     }
 

@@ -23,6 +23,7 @@ impl ClientShellState {
 
     fn set_sidebar_section_from_row(&mut self, row: u16, outcome: &mut ClientShellInput) {
         let divider = self.hits.sidebar_divider;
+        let divider = super::fork_sections::split_drag_area(&self.hits).unwrap_or(divider);
         if divider.height == 0 {
             return;
         }
@@ -2157,6 +2158,10 @@ impl ClientShellState {
                         }),
                         outcome,
                     );
+                    return;
+                }
+                if let Some(url) = super::fork_sections::clicked_url(&self.hits, point) {
+                    outcome.actions.push(ClientShellAction::OpenSafeWebUrl(url));
                     return;
                 }
                 let scrollbar_hit = self

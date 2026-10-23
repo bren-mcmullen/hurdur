@@ -2,6 +2,25 @@
 
 Terminal based agent runtime for coding agents.
 
+## Fork Notice
+
+This checkout is `bren-mcmullen/hurdur`, a personal fork of Herdr (`origin` =
+the fork, `upstream` = `herdrdev/herdr`). Treat it as a private custom fork
+under the external contributor guardrail: commit and push to the fork, but never
+push to, open issues on, or open pull requests against `herdrdev/herdr`.
+Maintainer and local Can machine workflows do not apply. Universal project rules
+still do.
+
+Every fork change must keep `git merge upstream/master` as conflict-free as
+possible:
+
+- Make the smallest change that works. Prefer new files or modules over editing
+  upstream ones; when an upstream file must change, keep the hunk small and
+  local.
+- Do not reformat, rename, move, or clean up upstream code, and do not edit
+  upstream docs, changelogs, versions, or release files for fork tweaks.
+- Sync with `git merge upstream/master`; never rebase or force-push.
+
 ## Scope and Audience
 
 These instructions are layered.

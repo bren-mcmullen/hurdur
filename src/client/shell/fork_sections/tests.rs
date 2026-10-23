@@ -64,19 +64,116 @@ fn plan_drops_overflow_from_the_last_section_first() {
     let artifacts = repeated(&jsonl_item(&["x"], None), 3);
     let sections = ForkSections::from_jsonl_for_test(&[("mrs", &mrs), ("artifacts", &artifacts)]);
 
-    assert_eq!(sections.plan(13), vec![(0, 3), (1, 3)]);
-    assert_eq!(sections.plan(11), vec![(0, 3), (1, 1)]);
-    assert_eq!(sections.plan(10), vec![(0, 3)]);
-    assert_eq!(sections.plan(5), vec![(0, 1)]);
-    assert_eq!(sections.plan_height(&sections.plan(11)), 11);
-    assert_eq!(sections.plan_height(&sections.plan(0)), 0);
+    assert_eq!(planned(&sections, 13), vec![(0, 8, 3), (1, 5, 3)]);
+    assert_eq!(planned(&sections, 11), vec![(0, 8, 3), (1, 3, 1)]);
+    assert_eq!(planned(&sections, 10), vec![(0, 8, 3)]);
+    assert_eq!(planned(&sections, 5), vec![(0, 4, 1)]);
+    assert_eq!(planned(&sections, 0), Vec::new());
+}
+
+fn planned(sections: &ForkSections, budget: u16) -> Vec<(usize, u16, usize)> {
+    sections
+        .plan(budget)
+        .into_iter()
+        .map(|planned| (planned.index, planned.height, planned.max_items))
+        .collect()
 }
 
 #[test]
 fn plan_respects_max_items_and_hides_empty_sections() {
     let many = repeated(&jsonl_item(&["x"], None), 8);
     let sections = ForkSections::from_jsonl_for_test(&[("empty", ""), ("many", &many)]);
-    assert_eq!(sections.plan(40), vec![(1, default_max_items())]);
+    assert_eq!(
+        planned(&sections, 40),
+        vec![(1, 2 + default_max_items() as u16, default_max_items())]
+    );
+}
+
+#[test]
+fn plan_uses_dragged_heights_within_the_budget() {
+    let one = jsonl_item(&["x"], None);
+    let mut sections = ForkSections::from_jsonl_for_test(&[("mrs", &one), ("artifacts", &one)]);
+
+    sections.heights.insert("mrs".into(), 9);
+    assert_eq!(planned(&sections, 20), vec![(0, 9, usize::MAX), (1, 3, 1)]);
+
+    sections.heights.insert("mrs".into(), 50);
+    assert_eq!(planned(&sections, 20), vec![(0, 20, usize::MAX)]);
+
+    sections.heights.insert("mrs".into(), 1);
+    assert_eq!(
+        planned(&sections, 20),
+        vec![(0, MIN_SECTION_ROWS, usize::MAX), (1, 3, 1)]
+    );
+}
+
+fn placed_hits(placed: &[(usize, u16, u16)]) -> ForkSectionHits {
+    ForkSectionHits {
+        placed: placed
+            .iter()
+            .map(|(index, top, height)| Placed {
+                index: *index,
+                top: *top,
+                height: *height,
+            })
+            .collect(),
+        ..ForkSectionHits::default()
+    }
+}
+
+#[test]
+fn first_line_trades_rows_with_agents_and_keeps_spaces_room() {
+    let one = jsonl_item(&["x"], None);
+    let mut sections = ForkSections::from_jsonl_for_test(&[("mrs", &one), ("artifacts", &one)]);
+    let hits = placed_hits(&[(0, 20, 8), (1, 28, 5)]);
+
+    assert!(sections.resize_from_divider(0, 17, &hits));
+    assert_eq!(sections.heights.get("mrs"), Some(&11));
+    assert_eq!(sections.heights.get("artifacts"), None);
+
+    assert!(sections.resize_from_divider(0, 2, &hits));
+    assert_eq!(sections.heights.get("mrs"), Some(&(28 - MIN_SPLIT_ROWS)));
+
+    assert!(!sections.resize_from_divider(0, 2, &hits));
+    assert!(!sections.resize_from_divider(7, 2, &hits));
+}
+
+#[test]
+fn later_lines_trade_rows_with_the_section_above() {
+    let one = jsonl_item(&["x"], None);
+    let mut sections = ForkSections::from_jsonl_for_test(&[("mrs", &one), ("artifacts", &one)]);
+    let hits = placed_hits(&[(0, 20, 8), (1, 28, 5)]);
+
+    assert!(sections.resize_from_divider(1, 30, &hits));
+    assert_eq!(sections.heights.get("mrs"), Some(&10));
+    assert_eq!(sections.heights.get("artifacts"), Some(&MIN_SECTION_ROWS));
+
+    assert!(sections.resize_from_divider(1, 21, &hits));
+    assert_eq!(sections.heights.get("mrs"), Some(&MIN_SECTION_ROWS));
+    assert_eq!(sections.heights.get("artifacts"), Some(&10));
+}
+
+#[test]
+fn dragged_heights_round_trip_through_the_state_file() {
+    let path = std::env::temp_dir().join(format!(
+        "hurdur-sidebar-heights-{}-{}.json",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos()
+    ));
+    assert!(read_heights(&path).is_empty());
+
+    let mut sections = ForkSections::from_jsonl_for_test(&[("mrs", "")]);
+    sections.heights_path = Some(path.clone());
+    sections.heights.insert("mrs".into(), 7);
+    sections.save_heights();
+    assert_eq!(read_heights(&path), sections.heights);
+
+    std::fs::write(&path, "not json").expect("write heights");
+    assert!(read_heights(&path).is_empty());
+    let _ = std::fs::remove_file(&path);
 }
 
 #[test]

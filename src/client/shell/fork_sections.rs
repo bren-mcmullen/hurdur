@@ -3,23 +3,31 @@
 //! Sections are configured in `sidebar-sections.toml` next to `config.toml`. Only this client
 //! reads that file, so servers that don't know about it never report unknown keys. Each
 //! section's command runs on its own interval off the render path, and its JSON Lines output
-//! becomes rows below the Agents panel. Clicking a row opens its URL in the browser.
+//! becomes rows below the Agents panel. Clicking a row opens its URL in the browser. Dragging a
+//! section's top line gives it a fixed height, remembered per section title.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use super::render::{display_width, put_text};
-use super::{ClientShellConfig, ClientShellState, ShellHitMap};
+use super::{ClientShellConfig, ClientShellInput, ClientShellState, ShellHitMap};
 use crate::app::state::Palette;
 
 const FILE_NAME: &str = "sidebar-sections.toml";
+const HEIGHTS_FILE_NAME: &str = "fork-sidebar-sections.json";
+/// A dragged section keeps its line, its title, and one row.
+const MIN_SECTION_ROWS: u16 = 3;
+/// Rows always left for Spaces and Agents.
+const MIN_SPLIT_ROWS: u16 = 10;
 const MAX_SECTIONS: usize = 8;
 const MAX_ITEMS: usize = 50;
 const MAX_LINES_PER_ITEM: usize = 3;
@@ -242,6 +250,12 @@ struct RunResult {
     output: Result<Vec<u8>, String>,
 }
 
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct HeightsFile {
+    #[serde(default)]
+    heights: BTreeMap<String, u16>,
+}
+
 pub(super) struct ForkSections {
     path: Option<PathBuf>,
     sections: Vec<Section>,
@@ -249,17 +263,30 @@ pub(super) struct ForkSections {
     generation: u64,
     results_tx: mpsc::Sender<RunResult>,
     results: mpsc::Receiver<RunResult>,
+    heights_path: Option<PathBuf>,
+    /// Dragged heights by section title. Sections without one size to their rows.
+    heights: BTreeMap<String, u16>,
+    /// Section whose top line is being dragged.
+    drag: Option<usize>,
 }
 
 impl ForkSections {
     pub(super) fn load() -> Self {
-        // Tests build client configs too; keep them independent of the user's file.
+        // Tests build client configs too; keep them independent of the user's files.
         let path = (!cfg!(test)).then(|| {
             crate::config::config_path()
                 .parent()
                 .map_or_else(|| PathBuf::from(FILE_NAME), |dir| dir.join(FILE_NAME))
         });
         let mut sections = Self::empty(path);
+        sections.heights_path = (!cfg!(test)).then(|| {
+            crate::config::state_dir()
+                .join("client-shell")
+                .join(HEIGHTS_FILE_NAME)
+        });
+        if let Some(path) = sections.heights_path.as_deref() {
+            sections.heights = read_heights(path);
+        }
         sections.reload();
         sections
     }
@@ -272,6 +299,9 @@ impl ForkSections {
             generation: 0,
             results_tx,
             results,
+            heights_path: None,
+            heights: BTreeMap::new(),
+            drag: None,
         }
     }
 
@@ -366,43 +396,132 @@ impl ForkSections {
         repaint
     }
 
-    /// Picks which sections and how many of their items fit in `budget` rows. Earlier sections
-    /// win, so overflow drops items from the bottom of the last section first.
-    fn plan(&self, budget: u16) -> Vec<(usize, usize)> {
+    /// Sizes the non-empty sections within `budget` rows. Dragged sections take their saved
+    /// height and show as many items as fit; the rest size to their first `max_items` items.
+    /// Earlier sections win, so overflow shrinks the last section first.
+    fn plan(&self, budget: u16) -> Vec<Planned> {
         let mut remaining = budget;
         let mut plan = Vec::new();
         for (index, section) in self.sections.iter().enumerate() {
-            let mut shown = 0;
-            let mut height = SECTION_HEADER_ROWS;
-            for item in section.items.iter().take(section.config.max_items) {
-                if height.saturating_add(item.height()) > remaining {
-                    break;
-                }
-                height += item.height();
-                shown += 1;
-            }
-            if shown == 0 {
+            if section.items.is_empty() || remaining < MIN_SECTION_ROWS {
                 continue;
             }
-            remaining -= height;
-            plan.push((index, shown));
+            let planned = match self.heights.get(&section.config.title) {
+                Some(height) => Planned {
+                    index,
+                    height: (*height).clamp(MIN_SECTION_ROWS, remaining),
+                    max_items: usize::MAX,
+                },
+                None => {
+                    let mut shown = 0;
+                    let mut height = SECTION_HEADER_ROWS;
+                    for item in section.items.iter().take(section.config.max_items) {
+                        if height.saturating_add(item.height()) > remaining {
+                            break;
+                        }
+                        height += item.height();
+                        shown += 1;
+                    }
+                    if shown == 0 {
+                        continue;
+                    }
+                    Planned {
+                        index,
+                        height,
+                        max_items: shown,
+                    }
+                }
+            };
+            remaining -= planned.height;
+            plan.push(planned);
         }
         plan
     }
 
-    fn plan_height(&self, plan: &[(usize, usize)]) -> u16 {
-        plan.iter()
-            .map(|(index, shown)| {
-                SECTION_HEADER_ROWS
-                    + self.sections[*index]
-                        .items
-                        .iter()
-                        .take(*shown)
-                        .map(Item::height)
-                        .sum::<u16>()
-            })
-            .sum()
+    /// Moves the top line of section `index` to `row`, using the last rendered geometry. The
+    /// first line trades rows with Agents; later lines trade rows with the section above.
+    fn resize_from_divider(&mut self, index: usize, row: u16, hits: &ForkSectionHits) -> bool {
+        let Some(position) = hits.placed.iter().position(|placed| placed.index == index) else {
+            return false;
+        };
+        let lower = hits.placed[position];
+        let bottom = lower.top + lower.height;
+        let upper = position.checked_sub(1).map(|above| hits.placed[above]);
+        let min_row = upper.map_or(hits.sidebar_top.saturating_add(MIN_SPLIT_ROWS), |upper| {
+            upper.top + MIN_SECTION_ROWS
+        });
+        let max_row = bottom.saturating_sub(MIN_SECTION_ROWS);
+        if min_row > max_row {
+            return false;
+        }
+        let row = row.clamp(min_row, max_row);
+        let mut changed = self.set_height(lower.index, bottom - row);
+        if let Some(upper) = upper {
+            changed |= self.set_height(upper.index, row - upper.top);
+        }
+        changed
     }
+
+    fn set_height(&mut self, index: usize, height: u16) -> bool {
+        let Some(section) = self.sections.get(index) else {
+            return false;
+        };
+        self.heights.insert(section.config.title.clone(), height) != Some(height)
+    }
+
+    fn save_heights(&self) {
+        let Some(path) = self.heights_path.as_deref() else {
+            return;
+        };
+        let file = HeightsFile {
+            heights: self.heights.clone(),
+        };
+        let result = serde_json::to_vec_pretty(&file)
+            .map_err(std::io::Error::other)
+            .and_then(|json| {
+                if let Some(dir) = path.parent() {
+                    std::fs::create_dir_all(dir)?;
+                }
+                let temporary = path.with_extension("json.tmp");
+                std::fs::write(&temporary, json)?;
+                std::fs::rename(&temporary, path)
+            });
+        if let Err(error) = result {
+            warn!(path = %path.display(), %error, "failed to save sidebar section heights");
+        }
+    }
+}
+
+fn read_heights(path: &std::path::Path) -> BTreeMap<String, u16> {
+    match std::fs::read(path) {
+        Ok(bytes) => match serde_json::from_slice::<HeightsFile>(&bytes) {
+            Ok(file) => file.heights,
+            Err(error) => {
+                warn!(path = %path.display(), %error, "ignoring unreadable sidebar section heights");
+                BTreeMap::new()
+            }
+        },
+        Err(error) => {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                warn!(path = %path.display(), %error, "ignoring unreadable sidebar section heights");
+            }
+            BTreeMap::new()
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Planned {
+    index: usize,
+    height: u16,
+    max_items: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Placed {
+    index: usize,
+    top: u16,
+    height: u16,
 }
 
 fn read_configs(path: &std::path::Path) -> Result<Vec<SectionConfig>, String> {
@@ -463,11 +582,15 @@ async fn run_command(command: &str, timeout: Duration) -> Result<Vec<u8>, String
 pub(super) struct ForkSectionHits {
     items: Vec<(Rect, String)>,
     split_area: Option<Rect>,
+    /// Each visible section's top line, by section index.
+    dividers: Vec<(Rect, usize)>,
+    placed: Vec<Placed>,
+    sidebar_top: u16,
 }
 
 pub(super) struct ForkSectionsLayout {
     area: Rect,
-    plan: Vec<(usize, usize)>,
+    plan: Vec<Planned>,
 }
 
 /// Takes rows for the fork sections off the bottom of the expanded sidebar. Returns the area
@@ -477,9 +600,10 @@ pub(super) fn split_sidebar(
     config: &ClientShellConfig,
     hits: &mut ShellHitMap,
 ) -> (Rect, ForkSectionsLayout) {
-    let sections = &config.fork_sections;
-    let plan = sections.plan(area.height / 2);
-    let height = sections.plan_height(&plan);
+    let plan = config
+        .fork_sections
+        .plan(area.height.saturating_sub(MIN_SPLIT_ROWS));
+    let height = plan.iter().map(|planned| planned.height).sum::<u16>();
     if height == 0 {
         return (
             area,
@@ -490,9 +614,24 @@ pub(super) fn split_sidebar(
         );
     }
     let split = Rect::new(area.x, area.y, area.width, area.height - height);
-    hits.fork_sections.split_area = Some(split);
     // The last column is the sidebar's separator.
     let fork_area = Rect::new(area.x, split.bottom(), area.width.saturating_sub(1), height);
+    let fork_hits = &mut hits.fork_sections;
+    fork_hits.split_area = Some(split);
+    fork_hits.sidebar_top = area.y;
+    let mut top = fork_area.y;
+    for planned in &plan {
+        fork_hits.placed.push(Placed {
+            index: planned.index,
+            top,
+            height: planned.height,
+        });
+        fork_hits.dividers.push((
+            Rect::new(fork_area.x, top, fork_area.width, 1),
+            planned.index,
+        ));
+        top += planned.height;
+    }
     (
         split,
         ForkSectionsLayout {
@@ -515,13 +654,14 @@ pub(super) fn render(
     let palette = &config.palette;
     // Keep the last column free for the sidebar collapse toggle.
     let text_width = area.width.saturating_sub(1);
-    let mut y = area.y;
-    for (index, shown) in &layout.plan {
-        let section = &config.fork_sections.sections[*index];
+    let mut top = area.y;
+    for planned in &layout.plan {
+        let section = &config.fork_sections.sections[planned.index];
+        let bottom = top + planned.height;
         put_text(
             buffer,
             area.x,
-            y,
+            top,
             area.width,
             &"─".repeat(area.width as usize),
             Style::default().fg(palette.surface_dim),
@@ -529,25 +669,32 @@ pub(super) fn render(
         put_text(
             buffer,
             area.x,
-            y + 1,
+            top + 1,
             text_width,
             &format!(" {}", sanitize(&section.config.title)),
             Style::default()
                 .fg(palette.overlay0)
                 .add_modifier(Modifier::BOLD),
         );
-        y += SECTION_HEADER_ROWS;
-        for item in section.items.iter().take(*shown) {
-            for (offset, line) in item.lines.iter().enumerate() {
+        let first_row = top + SECTION_HEADER_ROWS;
+        let mut y = first_row;
+        for item in section.items.iter().take(planned.max_items) {
+            // Show whole items only, except a lone first item in a very short section.
+            let rows = item.height().min(bottom.saturating_sub(y));
+            if rows == 0 || (rows < item.height() && y > first_row) {
+                break;
+            }
+            for (offset, line) in item.lines.iter().take(rows as usize).enumerate() {
                 render_line(buffer, area.x, y + offset as u16, text_width, line, palette);
             }
             if let Some(url) = &item.url {
                 hits.fork_sections
                     .items
-                    .push((Rect::new(area.x, y, area.width, item.height()), url.clone()));
+                    .push((Rect::new(area.x, y, area.width, rows), url.clone()));
             }
-            y += item.height();
+            y += rows;
         }
+        top = bottom;
     }
 }
 
@@ -582,6 +729,51 @@ pub(super) fn clicked_url(hits: &ShellHitMap, point: (u16, u16)) -> Option<Strin
 /// sections have taken part of the sidebar.
 pub(super) fn split_drag_area(hits: &ShellHitMap) -> Option<Rect> {
     hits.fork_sections.split_area
+}
+
+/// Starts dragging a section's top line when a left press lands on one.
+pub(super) fn start_divider_drag(state: &mut ClientShellState, point: (u16, u16)) -> bool {
+    let Some(index) = state
+        .hits
+        .fork_sections
+        .dividers
+        .iter()
+        .find(|(rect, _)| super::contains(*rect, point))
+        .map(|(_, index)| *index)
+    else {
+        return false;
+    };
+    state.config.fork_sections.drag = Some(index);
+    true
+}
+
+/// Moves or releases an active section-line drag. Returns whether the event was consumed.
+pub(super) fn continue_divider_drag(
+    state: &mut ClientShellState,
+    mouse: MouseEvent,
+    outcome: &mut ClientShellInput,
+) -> bool {
+    let Some(index) = state.config.fork_sections.drag else {
+        return false;
+    };
+    match mouse.kind {
+        MouseEventKind::Drag(MouseButton::Left) => {
+            if state.config.fork_sections.resize_from_divider(
+                index,
+                mouse.row,
+                &state.hits.fork_sections,
+            ) {
+                outcome.repaint = true;
+            }
+            true
+        }
+        MouseEventKind::Up(MouseButton::Left) => {
+            state.config.fork_sections.drag = None;
+            state.config.fork_sections.save_heights();
+            true
+        }
+        _ => false,
+    }
 }
 
 impl ClientShellState {

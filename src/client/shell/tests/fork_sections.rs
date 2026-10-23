@@ -81,6 +81,58 @@ fn section_divider_drag_tracks_the_reduced_sidebar_area() {
 }
 
 #[test]
+fn dragging_a_section_line_resizes_that_section() {
+    let mut state = state_with_sections(&[("mrs", MR_ITEM), ("artifacts", ARTIFACT_ITEM)]);
+    let header_row = |state: &mut ClientShellState, needle: &str| {
+        let rows = frame_rows(&state.compose(106, 30).expect("frame"));
+        rows.iter()
+            .position(|row| row.contains(needle))
+            .unwrap_or_else(|| panic!("{needle:?} missing from frame:\n{}", rows.join("\n")))
+            as u16
+    };
+    let mrs_header = header_row(&mut state, " mrs");
+    let artifacts_header = header_row(&mut state, " artifacts");
+    let section_divider = state.hits.sidebar_section_divider;
+    let mrs_line = mrs_header - 1;
+
+    let down = click(&mut state, 3, mrs_line);
+    assert!(down.actions.is_empty());
+    let mouse = |kind, row| {
+        RawInputEvent::Mouse(MouseEvent {
+            kind,
+            column: 3,
+            row,
+            modifiers: KeyModifiers::empty(),
+        })
+    };
+    let dragged = state.handle_raw_events(vec![mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        mrs_line - 2,
+    )]);
+    assert!(dragged.repaint);
+    state.handle_raw_events(vec![mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        mrs_line - 2,
+    )]);
+
+    assert_eq!(header_row(&mut state, " mrs"), mrs_header - 2);
+    assert_eq!(header_row(&mut state, " artifacts"), artifacts_header);
+    assert_eq!(
+        state.sidebar_section_split, 0.5,
+        "the fork line must not drag the Spaces/Agents divider"
+    );
+    assert_ne!(state.hits.sidebar_section_divider, Rect::default());
+    assert!(state.hits.sidebar_section_divider.y <= section_divider.y);
+
+    // After release, dragging without a new press on the line no longer resizes.
+    state.handle_raw_events(vec![mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        mrs_line - 4,
+    )]);
+    assert_eq!(header_row(&mut state, " mrs"), mrs_header - 2);
+}
+
+#[test]
 fn fork_section_clicks_are_disabled_without_mouse_capture() {
     let mut state = state_with_sections(&[("mrs", MR_ITEM)]);
     state.config.mouse_capture = false;

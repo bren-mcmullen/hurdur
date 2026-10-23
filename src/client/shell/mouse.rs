@@ -1021,6 +1021,9 @@ impl ClientShellState {
         if self.handle_mobile_mouse(mouse, outcome) {
             return;
         }
+        if super::fork_sections::continue_divider_drag(self, mouse, outcome) {
+            return;
+        }
         if mouse.kind == MouseEventKind::Drag(MouseButton::Left) {
             match self.chrome_drag.as_ref() {
                 Some(ClientChromeDrag::SidebarWidth) => {
@@ -1973,6 +1976,9 @@ impl ClientShellState {
                 if super::contains(self.hits.sidebar_section_divider, point) {
                     self.chrome_drag = Some(ClientChromeDrag::SidebarSection);
                     self.set_sidebar_section_from_row(mouse.row, outcome);
+                    return;
+                }
+                if super::fork_sections::start_divider_drag(self, point) {
                     return;
                 }
                 if super::contains(self.hits.workspace_scrollbar, point) {

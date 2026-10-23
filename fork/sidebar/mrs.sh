@@ -82,7 +82,12 @@ merged_status() {
       fi
       ;;
     manual)
-      printf 'yellow\t▶\tmerged · needs manual action\n'
+      # Some post-merge manual jobs are never run; stop showing them a day after merge.
+      if [ $((now - merged_at)) -ge 86400 ]; then
+        mark_done "$pid:$iid"
+      else
+        printf 'yellow\t▶\tmerged · needs manual action\n'
+      fi
       ;;
     failed | canceled | skipped)
       # A later passing pipeline on the target branch includes this change.

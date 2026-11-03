@@ -83,7 +83,7 @@ done < <(awk -F '\t' -v limit="$limit" 'NF >= 2 && !seen[$2]++ && shown++ < limi
       | {
           url: $url,
           lines: [[
-            {text: ((("   " + $ago) | .[-3:]) + " "), color: "dim"},
+            {text: ((("    " + $ago) | .[-4:]) + " "), color: "dim"},
             {text: $title, color: "blue"}
           ]]
         }'

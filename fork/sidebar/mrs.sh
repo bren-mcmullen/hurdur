@@ -151,7 +151,7 @@ while IFS= read -r mr; do
   jq -nc --argjson mr "$mr" --arg color "$color" --arg status "  $icon $text" '{
     url: $mr.url,
     lines: [
-      [{text: "\($mr.project) !\($mr.iid) ", color: "dim"}, {text: $mr.title, color: "text"}],
+      [{text: " \($mr.project) !\($mr.iid) ", color: "dim"}, {text: $mr.title, color: "text"}],
       [{text: $status, color: $color}]
     ]
   }'

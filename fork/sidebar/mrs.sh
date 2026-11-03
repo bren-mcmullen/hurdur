@@ -2,8 +2,8 @@
 # hurdur fork: rows for the sidebar "mrs" section.
 #
 # Lists my GitLab MRs active in the last 7 days with a plain-language status. Merged MRs stay
-# until their post-merge pipeline passes, or for a day after merge when it fails or waits on a
-# manual job. Prints one JSON item per line (the format is described in
+# until their post-merge pipeline passes, or for eight hours after merge when it fails or waits
+# on a manual job. Prints one JSON item per line (the format is described in
 # src/client/shell/fork_sections.rs). Exits non-zero on any GitLab error so herdr keeps the
 # previous rows.
 set -euo pipefail
@@ -83,8 +83,8 @@ merged_status() {
       fi
       ;;
     manual)
-      # Some post-merge manual jobs are never run; stop showing them a day after merge.
-      if [ $((now - merged_at)) -ge 86400 ]; then
+      # Some post-merge manual jobs are never run; stop showing them eight hours after merge.
+      if [ $((now - merged_at)) -ge 28800 ]; then
         mark_done "$pid:$iid"
       else
         printf 'yellow\t▶\tmerged · needs manual action\n'
@@ -92,10 +92,10 @@ merged_status() {
       ;;
     failed | canceled | skipped)
       # A later passing pipeline on the target branch includes this change. Either way, stop
-      # showing it a day after merge.
+      # showing it eight hours after merge.
       newer=$(api "projects/$pid/pipelines?ref=$(jq -rn --arg ref "$target" '$ref | @uri')&status=success&per_page=1" \
         | jq -r '.[0].id // 0') || return 1
-      if [ "$newer" -gt "$pipeline_id" ] || [ $((now - merged_at)) -ge 86400 ]; then
+      if [ "$newer" -gt "$pipeline_id" ] || [ $((now - merged_at)) -ge 28800 ]; then
         mark_done "$pid:$iid"
       elif [ "$status" = failed ]; then
         printf 'red\t✗\tmerged · pipeline failed\n'

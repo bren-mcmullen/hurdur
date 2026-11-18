@@ -34,7 +34,7 @@ running_states='created|waiting_for_resource|preparing|pending|running|scheduled
 
 # Prints "<color>\t<icon>\t<text>" for an open MR.
 open_status() {
-  local pid=$1 iid=$2 detail pipeline merge_status draft conflicts statuses awaiting_apply=false
+  local pid=$1 iid=$2 detail pipeline merge_status draft conflicts statuses awaiting_apply=false approved=false
   detail=$(api "projects/$pid/merge_requests/$iid") || return 1
   pipeline=$(jq -r '.head_pipeline.status // ""' <<<"$detail")
   merge_status=$(jq -r '.detailed_merge_status // ""' <<<"$detail")
@@ -46,6 +46,9 @@ open_status() {
     statuses=$(api "projects/$pid/repository/commits/$(jq -r '.head_pipeline.sha' <<<"$detail")/statuses?pipeline_id=$(jq -r '.head_pipeline.id' <<<"$detail")&per_page=100") || return 1
     awaiting_apply=$(jq --arg running "^($running_states)$" '
       map(select(.status | test($running))) | length > 0 and all(.name == "atlantis/apply")' <<<"$statuses")
+    if [ "$awaiting_apply" = true ]; then
+      approved=$(api "projects/$pid/merge_requests/$iid/approvals" | jq -r '.approved') || return 1
+    fi
   fi
   if [ "$draft" = true ]; then
     printf 'dim\t◌\tdraft\n'
@@ -65,8 +68,10 @@ open_status() {
     printf 'yellow\t○\tblocked\n'
   elif [ "$merge_status" = not_approved ]; then
     printf 'yellow\t○\tneeds approval\n'
-  elif [ "$awaiting_apply" = true ]; then
+  elif [ "$awaiting_apply" = true ] && [ "$approved" = true ]; then
     printf 'green\t✓\tready to apply\n'
+  elif [ "$awaiting_apply" = true ]; then
+    printf 'yellow\t○\tneeds approval\n'
   elif [ "$merge_status" = mergeable ]; then
     printf 'green\t✓\tready to merge\n'
   else

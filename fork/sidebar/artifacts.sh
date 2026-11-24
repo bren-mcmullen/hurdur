@@ -2,7 +2,8 @@
 # hurdur fork: rows for the sidebar "artifacts" section.
 #
 # Lists the claude.ai artifacts most recently published or edited from any Claude Code session
-# in the last 7 days, newest first. Database writes (ArtifactData) count as edits. Prints one
+# in the last 7 days, newest first. Database writes (ArtifactData) count as edits, and artifacts
+# deleted from a Claude Code session are left out. Prints one
 # JSON item per line (the format is described in src/client/shell/fork_sections.rs). Each
 # transcript's publishes and writes are cached by size and mtime, so a run only re-reads
 # transcripts that changed.
@@ -34,11 +35,12 @@ caches=()
 while IFS= read -r -d '' transcript; do
   key=$(printf '%s' "$transcript" | shasum | cut -c1-20)
   cache="$cache_dir/$key.tsv"
-  # v2: caches also hold database writes.
-  stamp="v2-$(file_stamp "$transcript")"
+  # v3: caches also hold database writes and deletes.
+  stamp="v3-$(file_stamp "$transcript")"
   if [ ! -f "$cache" ] || [ "$(cat "$cache.stamp" 2>/dev/null)" != "$stamp" ]; then
     # Publish results carry the artifact's url, title and version. Database write results
-    # carry only the url, so their title is left empty and filled in below.
+    # carry only the url, so their title is left empty and filled in below. Delete results
+    # get a fourth "deleted" field.
     { grep -F '"toolUseResult":' "$transcript" || true; } \
       | { grep -F 'https://claude.ai/' || true; } \
       | jq -r 'select((.toolUseResult | type) == "object")
@@ -49,6 +51,9 @@ while IFS= read -r -d '' transcript; do
                  elif (($result.written.url? // "") | startswith("https://claude.ai/"))
                     and $result.db_write.committed? == true then
                    [.timestamp, $result.written.url, ""]
+                 elif (($result.artifact_delete.url? // "") | startswith("https://claude.ai/"))
+                    and $result.artifact_delete.deleted? == true then
+                   [.timestamp, $result.artifact_delete.url, "", "deleted"]
                  else empty end
                | @tsv' 2>/dev/null >"$cache.tmp" || true
     mv "$cache.tmp" "$cache"
@@ -60,6 +65,12 @@ done < <(find "$projects" -type f -name '*.jsonl' -mtime -7 -print0)
 [ "${#caches[@]}" -gt 0 ] || exit 0
 
 rows=$(cat "${caches[@]}" | sort -r)
+
+gone=$(awk -F '\t' '$4 == "deleted" { print $2 }' <<<"$rows")
+if [ -n "$gone" ]; then
+  { grep -v -F -f <(printf '%s\n' "$gone") "$titles" || true; } >"$titles.tmp"
+  mv "$titles.tmp" "$titles"
+fi
 
 while IFS=$'\t' read -r timestamp url title; do
   if [ -z "$title" ]; then
@@ -73,7 +84,10 @@ while IFS=$'\t' read -r timestamp url title; do
     fi
   fi
   printf '%s\t%s\t%s\n' "$timestamp" "$url" "$title"
-done < <(awk -F '\t' -v limit="$limit" 'NF >= 2 && !seen[$2]++ && shown++ < limit' <<<"$rows") \
+done < <(awk -F '\t' -v limit="$limit" '
+           # A delete is the newest row for its artifact, so it is read before the rows it hides.
+           $4 == "deleted" { gone[$2] }
+           NF >= 2 && !($2 in gone) && !seen[$2]++ && shown++ < limit' <<<"$rows") \
   | jq -R -c --argjson now "$(date -u +%s)" '
       split("\t") as [$timestamp, $url, $title]
       | ($now - ($timestamp | sub("\\.[0-9]+"; "") | fromdateiso8601)) as $age
